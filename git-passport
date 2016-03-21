@@ -1,0 +1,182 @@
+#!/bin/sh
+
+CONFIG_FILE=~/.gitpassport
+
+## Utility functions
+
+function is_empty
+{
+    case "$1" in
+        *[!\ ]*) echo "false";;
+        *) echo "true";;
+    esac
+}
+
+function get_yes_no
+{
+    old_stty_cfg=$(stty -g)
+    stty raw -echo ; answer=$(head -c 1) ; stty $old_stty_cfg # Care playing with stty
+    if echo "$answer" | grep -iq "^y" ;then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# $1 - max value
+# exit values:
+# 1 - not an integer
+# 2 - more than max value
+# 3 - max is not a number
+function get_number
+{
+    max=$1
+    if ! [ "$max" -eq "$max" ] 2> /dev/null; then
+        return 3
+    fi
+    read -r number
+    # Check if input is a number
+    if ! [ "$number" -eq "$number" ] 2> /dev/null; then
+        return 1
+    fi
+    # Check if input is less than max
+    if [ "$number" -gt "$max" ]; then
+        return 2
+    fi
+    echo "$number"
+    return 0
+} 
+
+
+function show_active_identity
+{
+    NAME=$(git config user.name)
+    EMAIL=$(git config user.email)
+    if [ "$QUIET" != true ]; then
+        echo "Currently active identity:"
+        echo "Name : $NAME"
+        echo "Email: $EMAIL"
+    else
+        echo "$NAME <$EMAIL>"
+    fi
+}
+
+function get_identity_keys
+{
+    full_keys=$(git config --file $CONFIG_FILE --name-only --get-regexp passport\\.[^.]*\.email)
+    echo "$full_keys" | while read full_key; do
+        identity_name=$(echo $full_key | cut -d'.' -f2)
+        echo $identity_name
+    done
+}
+
+# $1 - identity index
+# return values:
+# 0 - found identity
+# 1 - identity not found
+function get_identity_name
+{
+    selected_index=$1
+    index=0
+    keys=$(get_identity_keys)
+    while read key; do
+        if [ $(is_empty "$key") == true ]; then
+            continue
+        fi
+        index=$((index + 1))
+        if [ "$selected_index" -eq "$index" ]; then
+            echo "$key"
+            return 0
+        fi
+    done <<EOF
+$keys
+EOF
+    return 1
+}
+
+
+function list_identities
+{
+    index=0
+    keys=$(get_identity_keys)
+    while read key; do
+        if [ $(is_empty "$key") == true ]; then
+            continue
+        fi
+        index=$((index + 1))
+        echo "$index) $key: $(git config --file $CONFIG_FILE passport.$key.name) <$(git config --file $CONFIG_FILE passport.$key.email)>"
+    done <<EOF
+$keys
+EOF
+    if [ $index -eq 0 ]; then
+        echo "No identities present. Make sure to add them to $CONFIG_FILE, using this format:"
+        echo "[passport \"Example\"]"
+        echo "    name = \"Name\""
+        echo "    email = \"Email\""
+        exit 1
+    fi
+    return $index
+}
+
+# $1 - identity name
+function activate_identity
+{
+    identity_name=$1
+    if [ $(is_empty "$identity_name") == true ]; then
+        list_identities
+        index=$?
+        echo -n "Select identity (1-$index)? "
+        identity_chosen=$(get_number $index)
+        identity_name=$(get_identity_name $identity_chosen)
+    fi
+    name=$(git config --file $CONFIG_FILE passport.$identity_name.name)
+    email=$(git config --file $CONFIG_FILE passport.$identity_name.email)
+    if [ $(is_empty "$name") == true ]; then
+        echo "No name set for $identity_name, make sure to set it in $CONFIG_FILE"
+    elif [ $(is_empty "$email") == true ]; then
+        echo "No email set for $identity_name, make sure to set it in $CONFIG_FILE"
+    else
+        echo -n "Using $identity_name ($name <$email>). Are you sure [y/N]? "
+        get_yes_no || exit 0
+        git config user.name "$name"
+        git config user.email "$email"
+        echo
+    fi
+}
+
+while [[ $# > 0 ]]; do
+case $1 in
+    list )
+        list_identities
+        exit 0
+        ;;
+    activate )
+        shift
+        activate_identity "$@"
+        exit 0
+        ;;
+    -q|--quiet )
+        QUIET=true
+        shift
+        ;;
+    -h|--help|-?|* )
+        echo 'Git Passport (Sh)'
+        echo '    A tool to manage multiple identites across your git repositories.'
+        echo '    Rewritten as a shell script, inspired by github.com/frace/git-passport'
+        echo '    https://github.com/infernozeus/git-passport-sh'
+        echo ''
+        echo 'Commands:'
+#        echo '    --uninstall-global       Turn off the global .git directory template that has the reminder.'
+        echo "    list                     List available identities"
+        echo "    activate <identity>      Activate an identity for this repository."
+        echo "    (no arguments)           Show currently active identity"
+        echo ''
+        echo 'Options:'
+        echo '    -q                       Quiet mode, less verbose'
+        exit 0
+        ;;
+esac
+done
+
+# if we get this far, no action has been specified, so we'll just show the active identity
+show_active_identity
